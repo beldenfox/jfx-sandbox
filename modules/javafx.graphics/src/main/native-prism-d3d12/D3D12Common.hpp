@@ -31,6 +31,7 @@
 #include <dxgi1_4.h>
 #include <dxgidebug.h>
 #include <dxcapi.h>
+#include <dcomp.h>
 #include <d3d12shader.h>
 #include <comdef.h>
 #include <wrl/client.h>
@@ -76,6 +77,11 @@ using DXGIFactoryPtr = Ptr<IDXGIFactory2>;
 using DXGIDebugPtr = Ptr<IDXGIDebug>;
 using DXGIInfoQueuePtr = Ptr<IDXGIInfoQueue>;
 using DXGISwapChainPtr = Ptr<IDXGISwapChain3>;
+
+using DXGIDevicePtr = Ptr<IDXGIDevice>;
+using CompositionDevicePtr = Ptr<IDCompositionDevice>;
+using CompositionTargetPtr = Ptr<IDCompositionTarget>;
+using CompositionVisualPtr = Ptr<IDCompositionVisual>;
 
 // Non-D3D-specific Blob object pointer
 using D3DBlobPtr = Ptr<ID3DBlob>;

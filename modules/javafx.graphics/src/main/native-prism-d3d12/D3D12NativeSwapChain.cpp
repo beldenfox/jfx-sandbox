@@ -33,7 +33,6 @@
 #include <com_sun_prism_d3d12_ni_D3D12NativeSwapChain.h>
 #include <string>
 
-
 namespace D3D12 {
 
 bool NativeSwapChain::GetSwapChainBuffers(UINT count)
@@ -130,6 +129,9 @@ NativeSwapChain::~NativeSwapChain()
 
     mTextureBuffers.clear();
 
+    mCompositionVisual.Reset();
+    mCompositionTarget.Reset();
+
     mSwapChain.Reset();
     mNativeDevice.reset();
 
@@ -144,14 +146,16 @@ bool NativeSwapChain::Init(const DXGIFactoryPtr& factory, HWND hwnd)
 
     DXGI_SWAP_CHAIN_DESC1 desc;
     D3D12NI_ZERO_STRUCT(desc);
-    desc.Width = 0; // TODO: D3D12: - for now it's taken from HWND
-    desc.Height = 0;
+    RECT clientRect;
+    ::GetClientRect(hwnd, &clientRect);
+    desc.Width = clientRect.right - clientRect.left;
+    desc.Height = clientRect.bottom - clientRect.top;
     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.BufferCount = 2;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-    desc.Scaling = DXGI_SCALING_NONE;
-    desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+    desc.Scaling = DXGI_SCALING_STRETCH;
+    desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
     desc.Flags = mSwapChainFlags;
 
     // NOTE: Technically we could make SwapChain buffers multi-sampled here and let the
@@ -168,7 +172,7 @@ bool NativeSwapChain::Init(const DXGIFactoryPtr& factory, HWND hwnd)
     desc.SampleDesc.Quality = 0;
 
     Ptr<IDXGISwapChain1> tmpSwapchain;
-    HRESULT hr = factory->CreateSwapChainForHwnd(mNativeDevice->GetCommandQueue().Get(), hwnd, &desc, nullptr, nullptr, &tmpSwapchain);
+    HRESULT hr = factory->CreateSwapChainForComposition(mNativeDevice->GetCommandQueue().Get(), &desc, nullptr, &tmpSwapchain);
     D3D12NI_RET_IF_FAILED(hr, false, "Failed to create SwapChain");
 
     hr = tmpSwapchain.As(&mSwapChain);
@@ -196,6 +200,22 @@ bool NativeSwapChain::Init(const DXGIFactoryPtr& factory, HWND hwnd)
     D3D12_RESOURCE_DESC bufDesc = mTextureBuffers[0]->GetResource()->GetDesc();
     mWidth = static_cast<UINT>(bufDesc.Width);
     mHeight = static_cast<UINT>(bufDesc.Height);
+
+    auto compositionDevice = mNativeDevice->GetCompositionDevice();
+    hr = compositionDevice->CreateTargetForHwnd(hwnd, FALSE, &mCompositionTarget);
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to create composition target");
+
+    hr = compositionDevice->CreateVisual(&mCompositionVisual);
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to create composition visual");
+
+    hr = mCompositionVisual->SetContent(mSwapChain.Get());
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to set swap chain as visual content");
+
+    hr = mCompositionTarget->SetRoot(mCompositionVisual.Get());
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to set visual as target root");
+
+    hr = compositionDevice->Commit();
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to commit composition changes");
 
     return true;
 }

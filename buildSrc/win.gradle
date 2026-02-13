@@ -390,7 +390,7 @@ WIN.prismD3D.rcCompiler = rcCompiler;
 WIN.prismD3D.rcSource = defaultRcSource
 WIN.prismD3D.rcFlags = ["/d", "JFX_FNAME=prism_d3d.dll", "/d", "JFX_INTERNAL_NAME=prismD3D", rcFlags].flatten();
 
-def D3D12Libs = ["d3d12.lib", "dxgi.lib", "dxguid.lib", "uuid.lib"];
+def D3D12Libs = ["d3d12.lib", "dxgi.lib", "dxguid.lib", "uuid.lib", "dcomp.lib"];
 WIN.prismD3D12 = [:]
 WIN.prismD3D12.javahInclude = ["com/sun/prism/d3d12/**/*"]
 WIN.prismD3D12.nativeSource = [

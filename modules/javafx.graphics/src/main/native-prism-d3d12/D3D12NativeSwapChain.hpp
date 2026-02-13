@@ -41,6 +41,8 @@ class NativeSwapChain: public Internal::IRenderTarget, Internal::IWaitableOperat
 {
     NIPtr<NativeDevice> mNativeDevice;
     DXGISwapChainPtr mSwapChain;
+    CompositionTargetPtr mCompositionTarget;
+    CompositionVisualPtr mCompositionVisual;
     std::vector<NIPtr<Internal::TextureBase>> mTextureBuffers;
     std::vector<Internal::DescriptorData> mRTVs;
     std::vector<uint64_t> mWaitFenceValues;

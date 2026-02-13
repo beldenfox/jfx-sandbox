@@ -143,6 +143,7 @@ class NativeDevice: public std::enable_shared_from_this<NativeDevice>
     D3D12DevicePtr mDevice;
     D3D12CommandQueuePtr mCommandQueue;
     D3D12FencePtr mFence;
+    CompositionDevicePtr mCompositionDevice;
     uint32_t mFenceValue;
     uint32_t mFrameCounter; // for debugging ex. triggering a breakpoint after X frames
     uint32_t mProfilerTransferWaitSourceID;
@@ -246,6 +247,11 @@ public:
     const D3D12DevicePtr& GetDevice()
     {
         return mDevice;
+    }
+
+    const CompositionDevicePtr& GetCompositionDevice()
+    {
+        return mCompositionDevice;
     }
 
     Internal::CheckpointQueue& GetCheckpointQueue()

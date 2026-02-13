@@ -86,6 +86,9 @@ bool Buffer::Init(const void* initialData, size_t size, D3D12_HEAP_TYPE heapType
     }
 
     D3D12_RESOURCE_STATES initialState = D3D12_RESOURCE_STATE_COMMON;
+    if (mHeapType == D3D12_HEAP_TYPE_READBACK) {
+        initialState = D3D12_RESOURCE_STATE_COPY_DEST;
+    }
     HRESULT hr = mNativeDevice->GetDevice()->CreateCommittedResource(&heapProps, D3D12_HEAP_FLAG_NONE,
         &resourceDesc, initialState, nullptr, IID_PPV_ARGS(&mBufferResource));
     D3D12NI_RET_IF_FAILED(hr, false, "Failed to create Buffer's Committed Resource");

@@ -283,6 +283,7 @@ NativeDevice::~NativeDevice()
     if (mFence) mFence.Reset();
     if (mCommandQueue) mCommandQueue.Reset();
     if (mDevice) mDevice.Reset();
+    if (mCompositionDevice) mCompositionDevice.Reset();
 
     if (mAdapter)
     {
@@ -309,6 +310,9 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
     HRESULT hr = D3D12CreateDevice(adapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&mDevice));
     D3D12NI_RET_IF_FAILED(hr, false, "Failed to create D3D12 Device");
     mDevice->SetName(L"Main D3D12 Device");
+
+    hr = DCompositionCreateDevice(nullptr, IID_PPV_ARGS(&mCompositionDevice));
+    D3D12NI_RET_IF_FAILED(hr, false, "Failed to create composition device");
 
     DXGI_ADAPTER_DESC adapterDesc;
     mAdapter->GetDesc(&adapterDesc);
