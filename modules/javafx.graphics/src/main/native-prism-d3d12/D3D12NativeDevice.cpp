@@ -212,18 +212,19 @@ NativeDevice::VertexSubregion NativeDevice::GetNewRegionForVertices(uint32_t ver
     if (vertexCount > (Constants::MAX_BATCH_VERTICES / 2))
     {
         // rendering more vertices might utilize the Ring Buffer better if we just reserve a separate space for them
-        mRingBuffer->DeclareRequired(vertexCount * 8 * sizeof(float));
+        mVertexRingBuffer->DeclareRequired(vertexCount * 8 * sizeof(float));
+        Internal::GPURingBuffer::GPURegion region = mVertexRingBuffer->ReserveCPU(vertexCount * 8 * sizeof(float));
 
         VertexSubregion separateRegion;
-        separateRegion.subregion = mRingBuffer->Reserve(vertexCount * 8 * sizeof(float));
+        separateRegion.subregion = region.cpuRegion;
         if (!separateRegion)
         {
-            D3D12NI_LOG_ERROR("Ring Buffer allocation failed for quad rendering");
+            D3D12NI_LOG_ERROR("2D Vertex Ring Buffer allocation failed");
             return VertexSubregion();
         }
 
-        separateRegion.view.BufferLocation = separateRegion.subregion.gpu;
-        separateRegion.view.SizeInBytes = static_cast<UINT>(separateRegion.subregion.size);
+        separateRegion.view.BufferLocation = region.gpuRegion.gpu;
+        separateRegion.view.SizeInBytes = static_cast<UINT>(region.gpuRegion.size);
         separateRegion.view.StrideInBytes = sizeof(Vertex_2D);
 
         return separateRegion;
@@ -232,15 +233,16 @@ NativeDevice::VertexSubregion NativeDevice::GetNewRegionForVertices(uint32_t ver
     if (!m2DVertexBatch.Valid() || vertexCount > m2DVertexBatch.Available())
     {
         // reserve space on Ring Buffer
-        mRingBuffer->DeclareRequired(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
-        Internal::RingBuffer::Region newVertexRegion = mRingBuffer->Reserve(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
-        if (!newVertexRegion)
+        mVertexRingBuffer->DeclareRequired(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
+
+        Internal::GPURingBuffer::GPURegion newVertexRegion = mVertexRingBuffer->ReserveCPU(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
+        if (!newVertexRegion.cpuRegion)
         {
-            D3D12NI_LOG_ERROR("Ring Buffer allocation failed for quad rendering");
+            D3D12NI_LOG_ERROR("2D Vertex Ring Buffer allocation failed");
             return VertexSubregion();
         }
 
-        m2DVertexBatch.AssignNewRegion(newVertexRegion);
+        m2DVertexBatch.AssignNewRegion(newVertexRegion.cpuRegion, newVertexRegion.gpuRegion);
     }
 
     return m2DVertexBatch.Subregion(vertexCount);
@@ -255,9 +257,9 @@ NativeDevice::NativeDevice()
     , mFrameCounter(0)
     , mProfilerTransferWaitSourceID(0)
     , mProfilerFrameTimeID(0)
+    , mProfilerRecordTimeID(0)
     , mMidframeFlushNeeded(false)
     , mWaitableOps()
-    , mBarrierQueue()
     , mCheckpointQueue()
     , mRootSignatureManager()
     , mRenderingContext()
@@ -273,6 +275,7 @@ NativeDevice::NativeDevice()
     , mCommandListPool()
     , m2DIndexBuffer()
     , mRingBuffer()
+    , mVertexRingBuffer()
 {
 }
 
@@ -381,6 +384,15 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
         return false;
     }
 
+    // TODO adjust thresholds if this idea works fine for memory optimization
+    mVertexRingBuffer = std::make_shared<Internal::GPURingBuffer>(shared_from_this());
+    mVertexRingBuffer->SetDebugName("2D Vertex GPU Ring Buffer");
+    if (!mVertexRingBuffer->Init(Internal::Config::MainRingBufferThreshold(), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT))
+    {
+        D3D12NI_LOG_ERROR("Failed to initialize 2D Vertex Ring Buffer");
+        return false;
+    }
+
     mRTVAllocator = std::make_shared<Internal::DescriptorAllocator>(shared_from_this());
     if (!mRTVAllocator->Init(D3D12_DESCRIPTOR_HEAP_TYPE_RTV, false))
     {
@@ -406,13 +418,6 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
     mDSVAllocator->SetName("DepthStencilView Descriptor Heap");
     mSRVAllocator->SetName("CBV/SRV/UAV Descriptor Heap");
 
-    mSamplerStorage = std::make_shared<Internal::SamplerStorage>(shared_from_this());
-    if (!mSamplerStorage->Init())
-    {
-        D3D12NI_LOG_ERROR("Failed to initialize Sampler Storage");
-        return false;
-    }
-
     if (!Build2DIndexBuffer()) return false;
 
     mPassthroughVS = GetInternalShader(Constants::PASSTHROUGH_VS_NAME);
@@ -420,6 +425,7 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
 
     mProfilerTransferWaitSourceID = Internal::Profiler::Instance().RegisterSource("NativeDevice Transfer Wait");
     mProfilerFrameTimeID = Internal::Profiler::Instance().RegisterSource("Frame Time");
+    mProfilerRecordTimeID = Internal::Profiler::Instance().RegisterSource("Record Time");
 
     Internal::Profiler::Instance().TimingStart(mProfilerFrameTimeID);
     return true;
@@ -431,16 +437,15 @@ void NativeDevice::Release()
 
     // ensures the pipeline is purged
     mCheckpointQueue.WaitForNextCheckpoint(CheckpointType::ALL);
-    Internal::Profiler::Instance().PrintSummary();
 
     mWaitableOps.clear();
 
     if (mRenderingContext) mRenderingContext.reset();
     if (mRingBuffer) mRingBuffer.reset();
+    if (mVertexRingBuffer) mVertexRingBuffer.reset();
     if (m2DIndexBuffer) m2DIndexBuffer.reset();
     if (mCommandListPool) mCommandListPool.reset();
     if (mShaderLibrary) mShaderLibrary.reset();
-    if (mSamplerStorage) mSamplerStorage.reset();
     if (mRTVAllocator) mRTVAllocator.reset();
     if (mDSVAllocator) mDSVAllocator.reset();
     if (mSRVAllocator) mSRVAllocator.reset();
@@ -593,8 +598,12 @@ void NativeDevice::RenderQuads(const Internal::MemoryView<float>& vertices, cons
     BBox dirtyBBox = AssembleVertexData(vertexRegion.subregion.cpu, vertices, colors, vertexCount);
     mRenderingContext->SetVertexBuffer(vertexRegion.view);
 
+    Internal::Profiler::Instance().TimingStart(mProfilerRecordTimeID);
+
     // draw the quads converting vertexCount to indexCount - 1 quad is 4 vertices, or 6 indices
     mRenderingContext->Draw((vertexCount / 4) * 6, vertexRegion.startOffset, dirtyBBox);
+
+    Internal::Profiler::Instance().TimingEnd(mProfilerRecordTimeID);
 
     if (mMidframeFlushNeeded)
     {
@@ -655,7 +664,11 @@ void NativeDevice::RenderMeshView(const NIPtr<NativeMeshView>& meshView)
         mRenderingContext->SetTexture(i, material->GetMap(static_cast<TextureMapType>(i)));
     }
 
+    Internal::Profiler::Instance().TimingStart(mProfilerRecordTimeID);
+
     mRenderingContext->Draw(mesh->GetIndexCount(), 0);
+
+    Internal::Profiler::Instance().TimingEnd(mProfilerRecordTimeID);
 
     if (mMidframeFlushNeeded)
     {
@@ -771,9 +784,9 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
             dstLoc.pResource = dstRT->GetTexture()->GetResource().Get();
             dstLoc.SubresourceIndex = 0;
 
-            QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_SOURCE);
-            QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_DEST);
-            SubmitTextureTransitions();
+            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_SOURCE);
+            mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_DEST);
+            mRenderingContext->SubmitTextureTransitions();
 
             GetCurrentCommandList()->CopyTextureRegion(&dstLoc, dst.x0, dst.y0, 0, &srcLoc, &srcBox);
         }
@@ -786,9 +799,9 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
             srcRect.right = src.x1;
             srcRect.bottom = src.y1;
 
-            QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
-            QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_DEST);
-            SubmitTextureTransitions();
+            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+            mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_DEST);
+            mRenderingContext->SubmitTextureTransitions();
 
             GetCurrentCommandList()->ResolveSubresourceRegion(
                 dstRT->GetTexture()->GetResource().Get(), 0, dst.x0, dst.y0,
@@ -813,9 +826,9 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
                 return false;
             }
 
-            QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
-            QueueTextureTransition(intermediateTexture, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-            SubmitTextureTransitions();
+            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
+            mRenderingContext->QueueTextureTransition(intermediateTexture, D3D12_RESOURCE_STATE_RESOLVE_DEST);
+            mRenderingContext->SubmitTextureTransitions();
 
             GetCurrentCommandList()->ResolveSubresource(
                 intermediateTexture->GetResource().Get(), 0,
@@ -851,8 +864,6 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
         mRenderingContext->SetRenderTarget(dstRT);
         mRenderingContext->SetCompositeMode(CompositeMode::SRC);
 
-        mRenderingContext->DeclareRingResources();
-
         // prepare quad vertices for blitting
         QuadVertices fsQuad = AssembleVertexQuadForBlit(src, dst);
 
@@ -863,9 +874,9 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
 
         mRenderingContext->SetVertexBuffer(vertexRegion.view);
 
-        QueueTextureTransition(sourceTexture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-        SubmitTextureTransitions();
+        mRenderingContext->QueueTextureTransition(sourceTexture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+        mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+        mRenderingContext->SubmitTextureTransitions();
 
         BBox box;
         for (uint32_t i = 0; i < fsQuad.size(); ++i)
@@ -927,8 +938,8 @@ bool NativeDevice::ReadTexture(const NIPtr<NativeTexture>& texture, void* buffer
     dstLoc.PlacedFootprint.Footprint.Format = format;
     dstLoc.PlacedFootprint.Offset = 0;
 
-    QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    SubmitTextureTransitions();
+    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    mRenderingContext->SubmitTextureTransitions();
 
     GetCurrentCommandList()->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
 
@@ -990,8 +1001,8 @@ bool NativeDevice::GenerateMipmaps(const NIPtr<NativeTexture>& texture)
     uint32_t srcHeight = static_cast<uint32_t>(texture->GetHeight());
 
     // transition entire texture with mips to UAV state
-    QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    SubmitTextureTransitions();
+    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    mRenderingContext->SubmitTextureTransitions();
 
     // starting from 1, level 0 is our base mip level
     // also note, we're divinding by 2 a lot, so to make it faster we'll bit-shift instead
@@ -1021,16 +1032,16 @@ bool NativeDevice::GenerateMipmaps(const NIPtr<NativeTexture>& texture)
         mRenderingContext->ClearComputeResourcesApplied();
 
         // transition base level to non-PS-resource
-        QueueTextureTransition(texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+        mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                Internal::Utils::CalcSubresource(mipBase, texture->GetMipLevels(), 0));
 
         // each thread group manages an 8x8 square, so we need to dispatch (width/8) X groups and (height/8) Y groups
-        SubmitTextureTransitions();
+        mRenderingContext->SubmitTextureTransitions();
         mRenderingContext->Dispatch(std::max<UINT>(srcWidth >> 3, 1), std::max<UINT>(srcHeight >> 3, 1), 1);
 
         // transition base level back to UAV
         // this should make all subresources have the same state again
-        QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                Internal::Utils::CalcSubresource(mipBase, texture->GetMipLevels(), 0));
 
         srcWidth >>= constants.numLevels;
@@ -1113,8 +1124,8 @@ bool NativeDevice::UpdateTexture(const NIPtr<NativeTexture>& texture, const void
 
     // Ensure we are in COPY_DEST state. Texture can be now bound to RenderingContext
     // and exist in a different state.
-    QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_DEST);
-    SubmitTextureTransitions();
+    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_DEST);
+    mRenderingContext->SubmitTextureTransitions();
 
     GetCurrentCommandList()->CopyTextureRegion(&dstLoc, dstx, dsty, 0, &srcLoc, nullptr);
 
@@ -1123,9 +1134,37 @@ bool NativeDevice::UpdateTexture(const NIPtr<NativeTexture>& texture, const void
     return true;
 }
 
+// private
+void NativeDevice::ExecuteCurrentCommandList()
+{
+    // we query for this before Pool::AdvanceCommandList() because advancing
+    // the Command List will flush the buffer and we need this information afterwards
+    bool needsGPUVertexBufferUpdate = mVertexRingBuffer->HasUncommittedData();
+
+    D3D12GraphicsCommandListPtr cmdList = mCommandListPool->AdvanceCommandList();
+    if (needsGPUVertexBufferUpdate)
+    {
+        mVertexRingBuffer->RecordTransferToGPU();
+        D3D12GraphicsCommandListPtr copyVertexBufferList = mCommandListPool->AdvanceCommandList();
+
+        // Copy vertex buffer list must happen before just-recorded list, this is
+        // to ensure the copy will be executed first. This lets the driver merge the
+        // lists and parallelize them better. Synchronization will be done via barriers.
+        ID3D12CommandList* lists[2] = { copyVertexBufferList.Get(), cmdList.Get() };
+        mCommandQueue->ExecuteCommandLists(2, lists);
+    }
+    else
+    {
+        // GPU vertex ring buffer was not used, we don't need to transfer any data
+        // simply submit this Command List for execution and move on
+        ID3D12CommandList* lists[1] = { cmdList.Get() };
+        mCommandQueue->ExecuteCommandLists(1, lists);
+    }
+}
+
 void NativeDevice::FlushCommandList(CheckpointType type)
 {
-    mCommandListPool->SubmitCurrentCommandList();
+    ExecuteCurrentCommandList();
     Signal(type);
 
     mRenderingContext->ClearAppliedFlags();
@@ -1136,7 +1175,7 @@ void NativeDevice::FinishFrame()
 {
     // Not calling FlushCommandList() here to avoid Signal()
     // SwapChain will execute Signal on its own to mark the actual end of the frame
-    mCommandListPool->SubmitCurrentCommandList();
+    ExecuteCurrentCommandList();
 
     mRenderingContext->ClearAppliedFlags();
     mRenderingContext->FinishFrame();
@@ -1146,11 +1185,6 @@ void NativeDevice::FinishFrame()
     Internal::Profiler::Instance().MarkFrameEnd();
     Internal::Profiler::Instance().TimingEnd(mProfilerFrameTimeID);
     Internal::Profiler::Instance().TimingStart(mProfilerFrameTimeID);
-}
-
-void NativeDevice::Execute(const std::vector<ID3D12CommandList*>& commandLists)
-{
-    mCommandQueue->ExecuteCommandLists(static_cast<UINT>(commandLists.size()), commandLists.data());
 }
 
 void NativeDevice::AdvanceCommandAllocator()
@@ -1177,30 +1211,6 @@ void NativeDevice::UnregisterWaitableOperation(Internal::IWaitableOperation* wai
             mWaitableOps.pop_back();
         }
     }
-}
-
-void NativeDevice::QueueTextureTransition(const NIPtr<Internal::TextureBase>& tex, D3D12_RESOURCE_STATES newState, uint32_t subresource)
-{
-    if (tex->GetResourceState(subresource) == newState) return;
-
-    D3D12_RESOURCE_BARRIER barrier;
-    D3D12NI_ZERO_STRUCT(barrier);
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = tex->GetResource().Get();
-    barrier.Transition.StateBefore = tex->GetResourceState(subresource);
-    barrier.Transition.StateAfter = newState;
-    barrier.Transition.Subresource = subresource;
-    mBarrierQueue.emplace_back(barrier);
-
-    tex->SetResourceState(newState, subresource);
-}
-
-void NativeDevice::SubmitTextureTransitions()
-{
-    if (mBarrierQueue.size() == 0) return;
-
-    GetCurrentCommandList()->ResourceBarrier(static_cast<UINT>(mBarrierQueue.size()), mBarrierQueue.data());
-    mBarrierQueue.clear();
 }
 
 // Signal() is separate and not called everytime Execute() is called

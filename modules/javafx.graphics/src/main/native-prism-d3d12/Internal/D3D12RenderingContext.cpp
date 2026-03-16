@@ -29,6 +29,7 @@
 
 #include "D3D12Config.hpp"
 #include "D3D12Profiler.hpp"
+#include "D3D12RenderingPayload.hpp"
 
 
 namespace D3D12 {
@@ -36,10 +37,10 @@ namespace Internal {
 
 void RenderingContext::RecordClear(float r, float g, float b, float a, bool clearDepth, const D3D12_RECT& clearRect)
 {
-    mNativeDevice->QueueTextureTransition(mRenderTarget.Get()->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+    QueueTextureTransition(mRenderTarget.Get()->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     if (mRenderTarget.Get()->HasDepthTexture())
-        mNativeDevice->QueueTextureTransition(mRenderTarget.Get()->GetDepthTexture(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
-    mNativeDevice->SubmitTextureTransitions();
+        QueueTextureTransition(mRenderTarget.Get()->GetDepthTexture(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+    SubmitTextureTransitions();
 
     float rgba[4] = { r, g, b, a };
     mNativeDevice->GetCurrentCommandList()->ClearRenderTargetView(mRenderTarget.Get()->GetRTVDescriptorData().CPU(0), rgba, 1, &clearRect);
@@ -51,14 +52,12 @@ void RenderingContext::RecordClear(float r, float g, float b, float a, bool clea
     {
         mNativeDevice->GetCurrentCommandList()->ClearDepthStencilView(mRenderTarget.Get()->GetDSVDescriptorData().CPU(0), D3D12_CLEAR_FLAG_DEPTH, 1.0f, 0, 1, &clearRect);
     }
-
-    Profiler::Instance().MarkEvent(mRecordClearProfilerID, Profiler::Event::Event);
 }
 
 RenderingContext::RenderingContext(const NIPtr<NativeDevice>& nativeDevice)
     : mNativeDevice(nativeDevice)
     , mState(nativeDevice)
-    , mRecordClearProfilerID(std::numeric_limits<uint32_t>::max())
+    , mRenderThread(nativeDevice)
     , mIndexBuffer()
     , mVertexBuffer()
     , mPipelineState()
@@ -72,6 +71,7 @@ RenderingContext::RenderingContext(const NIPtr<NativeDevice>& nativeDevice)
     , mComputeRootSignature()
     , mComputeResources()
     , mUsedRTs()
+    , mBarrierQueue()
 {
     D3D12NI_LOG_DEBUG("RenderingContext: D3D12 API opts are %s", Config::IsApiOptsEnabled() ? "enabled" : "disabled");
 
@@ -115,7 +115,11 @@ bool RenderingContext::Init()
         return false;
     }
 
-    mRecordClearProfilerID = Profiler::Instance().RegisterSource("RenderingContext RecordClear");
+    if (!mRenderThread.Init())
+    {
+        D3D12NI_LOG_ERROR("Failed to initialize Render Thread");
+        return false;
+    }
 
     return true;
 }
@@ -236,6 +240,30 @@ void RenderingContext::Dispatch(uint32_t x, uint32_t y, uint32_t z)
     }
 
     mNativeDevice->GetCurrentCommandList()->Dispatch(x, y, z);
+}
+
+void RenderingContext::QueueTextureTransition(const NIPtr<Internal::TextureBase>& tex, D3D12_RESOURCE_STATES newState, uint32_t subresource)
+{
+    if (tex->GetResourceState(subresource) == newState) return;
+
+    D3D12_RESOURCE_BARRIER barrier;
+    D3D12NI_ZERO_STRUCT(barrier);
+    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition.pResource = tex->GetResource().Get();
+    barrier.Transition.StateBefore = tex->GetResourceState(subresource);
+    barrier.Transition.StateAfter = newState;
+    barrier.Transition.Subresource = subresource;
+    mBarrierQueue.emplace_back(barrier);
+
+    tex->SetResourceState(newState, subresource);
+}
+
+void RenderingContext::SubmitTextureTransitions()
+{
+    if (mBarrierQueue.size() == 0) return;
+
+    mNativeDevice->GetCurrentCommandList()->ResourceBarrier(static_cast<UINT>(mBarrierQueue.size()), mBarrierQueue.data());
+    mBarrierQueue.clear();
 }
 
 void RenderingContext::ClearTextureUnit(uint32_t unit)
@@ -451,19 +479,21 @@ bool RenderingContext::Apply()
     if (!commandList) return false;
 
     mRenderTarget.Apply(commandList, mState);
-    mViewport.Apply(commandList, mState);
-
-    mScissor.Apply(commandList, mState);
-    mDefaultScissor.Apply(commandList, mState);
-
     mPipelineState.Apply(commandList, mState);
-    mRootSignature.Apply(commandList, mState);
+
+    std::unique_ptr<RenderingPayload> payload = std::make_unique<RenderingPayload>();
+    mRootSignature.AddToPayload(payload, mState);
+    mViewport.AddToPayload(payload, mState);
+    mScissor.AddToPayload(payload, mState);
+    mDefaultScissor.AddToPayload(payload, mState);
+    mPrimitiveTopology.AddToPayload(payload, mState);
+    mVertexBuffer.AddToPayload(payload, mState);
+    mIndexBuffer.AddToPayload(payload, mState);
+
+    mRenderThread.Execute(payload);
+
     mDescriptorHeap.Apply(commandList, mState);
     mResources.Apply(commandList, mState);
-
-    mPrimitiveTopology.Apply(commandList, mState);
-    mVertexBuffer.Apply(commandList, mState);
-    mIndexBuffer.Apply(commandList, mState);
 
     return true;
 }
@@ -489,9 +519,9 @@ bool RenderingContext::ApplyCompute()
 
 void RenderingContext::EnsureBoundTextureStates(D3D12_RESOURCE_STATES state)
 {
-    mNativeDevice->QueueTextureTransition(mRenderTarget.Get()->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
+    QueueTextureTransition(mRenderTarget.Get()->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
     if (mRenderTarget.Get()->HasDepthTexture())
-        mNativeDevice->QueueTextureTransition(mRenderTarget.Get()->GetDepthTexture(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
+        QueueTextureTransition(mRenderTarget.Get()->GetDepthTexture(), D3D12_RESOURCE_STATE_DEPTH_WRITE);
 
     mState.resourceManager.EnsureStates(mNativeDevice->GetCurrentCommandList(), state);
 }

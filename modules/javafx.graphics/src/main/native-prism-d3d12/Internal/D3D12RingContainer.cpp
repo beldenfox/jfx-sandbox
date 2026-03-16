@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2024, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -38,6 +38,7 @@ void RingContainer::CheckThreshold()
 {
     if (mUncommitted > mFlushThreshold)
     {
+        D3D12NI_LOG_ERROR("LKDEBUG CheckThreshold wanted a midframe flush! Maybe it shouldn't do that");
         Internal::Profiler::Instance().MarkEvent(mProfilerSourceID, Profiler::Event::Signal);
         mNativeDevice->NotifyMidframeFlushNeeded();
     }

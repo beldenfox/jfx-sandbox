@@ -29,9 +29,11 @@
 
 #include "../D3D12NativeTexture.hpp"
 
+#include "D3D12CommandListPool.hpp"
 #include "D3D12IRenderTarget.hpp"
 #include "D3D12Matrix.hpp"
 #include "D3D12RenderingParameter.hpp"
+#include "D3D12RenderingThread.hpp"
 #include "D3D12PSOManager.hpp"
 
 #include <unordered_set>
@@ -61,7 +63,7 @@ class RenderingContext
 {
     NIPtr<NativeDevice> mNativeDevice;
     RenderingContextState mState;
-    uint32_t mRecordClearProfilerID;
+    RenderingThread mRenderThread;
 
     // some parameters are set by the Java Runtime ex. transforms, composite mode, textures
     // whenever we need to execute some internal operation (ex. BlitTexture()) we have to
@@ -105,6 +107,10 @@ class RenderingContext
     // start tracking anew
     std::unordered_set<NIPtr<Internal::IRenderTarget>> mUsedRTs;
 
+    // Transition queue - add entries via QueueTextureTransition() and submit them
+    // all at once with SubmitTextureTransitions()
+    std::vector<D3D12_RESOURCE_BARRIER> mBarrierQueue;
+
     void RecordClear(float r, float g, float b, float a, bool clearDepth, const D3D12_RECT& clearRect);
 
 public:
@@ -122,6 +128,8 @@ public:
     void Draw(uint32_t elements, uint32_t vbOffset);
     void Draw(uint32_t elements, uint32_t vbOffset, const BBox& dirtyBBox);
     void Dispatch(uint32_t x, uint32_t y, uint32_t z);
+    void QueueTextureTransition(const NIPtr<Internal::TextureBase>& tex, D3D12_RESOURCE_STATES newState, uint32_t subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES);
+    void SubmitTextureTransitions();
 
     void ClearTextureUnit(uint32_t unit);
     void SetIndexBuffer(const D3D12_INDEX_BUFFER_VIEW& ibView);
