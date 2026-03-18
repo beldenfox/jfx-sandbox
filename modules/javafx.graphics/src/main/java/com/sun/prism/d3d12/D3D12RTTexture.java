@@ -75,6 +75,9 @@ public class D3D12RTTexture extends D3D12Texture implements RTTexture, ReadbackR
         if (!resource.getResource().getNativeTexture().resize(width, height))
             return false;
 
+        contentWidth = width;
+        contentHeight = height;
+
         return resource.getResource().getRenderTarget().refresh();
     }
 
