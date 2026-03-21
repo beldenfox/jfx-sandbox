@@ -1484,7 +1484,7 @@ JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindow
             dwExStyle |= WS_EX_NOINHERITLAYOUT | WS_EX_LAYOUTRTL;
         }
 
-        if (mask & com_sun_glass_ui_Window_UNIFIED) {
+        if ((mask & com_sun_glass_ui_Window_TRANSPARENT) == 0) {
             dwExStyle |= WS_EX_NOREDIRECTIONBITMAP;
         }
 
