@@ -79,21 +79,11 @@ bool GPURingBuffer::Init(size_t flushThreshold, size_t alignment, size_t size)
     mGPUBufferResource->SetName(L"Ring Buffer Resource (GPU)");
 
     mGPUResourcePtr = mGPUBufferResource->GetGPUVirtualAddress();
-
-    D3D12_RESOURCE_BARRIER barrier;
-    D3D12NI_ZERO_STRUCT(barrier);
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = mGPUBufferResource.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-    mNativeDevice->GetCurrentCommandList()->ResourceBarrier(1, &barrier);
-
-    // to ensure the transition happens, just in case
-    mNativeDevice->FlushCommandList(CheckpointType::TRANSFER);
+    mGPUResourceState = D3D12_RESOURCE_STATE_COMMON;
 
     mChunkToTransferStart = 0;
     mChunkToTransferSize = 0;
+    mLastReserveTail = 0;
 
     return true;
 }
@@ -103,6 +93,7 @@ GPURingBuffer::GPURegion GPURingBuffer::ReserveCPU(size_t size)
     GPURegion result;
 
     result.cpuRegion = RingBuffer::Reserve(size);
+    if (!result.cpuRegion) return GPURegion();
 
     // fill gpu region struct based on cpu region
     // we assume both buffers
@@ -111,39 +102,44 @@ GPURingBuffer::GPURegion GPURingBuffer::ReserveCPU(size_t size)
     result.gpuRegion.offsetFromStart = result.cpuRegion.offsetFromStart;
     result.gpuRegion.gpu = mGPUResourcePtr + result.gpuRegion.offsetFromStart;
 
-    mChunkToTransferSize += result.gpuRegion.size;
+    if (mLastReserveTail > mTail)
+    {
+        // wrap around
+        mChunkToTransferSize += (mSize - mLastReserveTail) + mTail;
+    }
+    else
+    {
+        mChunkToTransferSize += (mTail - mLastReserveTail);
+    }
+
+    mLastReserveTail = mTail;
     return result;
 }
 
 void GPURingBuffer::RecordTransferToGPU()
 {
     // we assume Current Command List is empty, this should be called right after Pool::AdvanceCommandList()
+    const NIPtr<RenderingContext>& context = mNativeDevice->GetRenderingContext();
 
-    D3D12_RESOURCE_BARRIER barrier;
-    D3D12NI_ZERO_STRUCT(barrier);
-    barrier.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barrier.Transition.pResource = mGPUBufferResource.Get();
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
-
-    mNativeDevice->GetCurrentCommandList()->ResourceBarrier(1, &barrier);
+    context->QueueResourceTransition(mGPUBufferResource, mGPUResourceState, D3D12_RESOURCE_STATE_COPY_DEST);
+    context->SubmitResourceTransitions();
 
     if (mChunkToTransferStart + mChunkToTransferSize > mSize)
     {
         // double transfer - offset + size cross buffer boundaries
         // first, copy from current offset to end
         size_t remainder = mSize - mChunkToTransferStart;
-        mNativeDevice->GetCurrentCommandList()->CopyBufferRegion(
-            mGPUBufferResource.Get(), mChunkToTransferStart,
-            mBufferResource.Get(), mChunkToTransferStart,
+
+        context->CopyBufferRegion(
+            mGPUBufferResource, mChunkToTransferStart,
+            mBufferResource, mChunkToTransferStart,
             remainder
         );
 
         // second, copy from beginning to the rest of data
-        mNativeDevice->GetCurrentCommandList()->CopyBufferRegion(
-            mGPUBufferResource.Get(), 0,
-            mBufferResource.Get(), 0,
+        context->CopyBufferRegion(
+            mGPUBufferResource, 0,
+            mBufferResource, 0,
             mChunkToTransferSize - remainder
         );
 
@@ -152,9 +148,9 @@ void GPURingBuffer::RecordTransferToGPU()
     else
     {
         // single transfer - offset + size doesn't cross buffer boundaries
-        mNativeDevice->GetCurrentCommandList()->CopyBufferRegion(
-            mGPUBufferResource.Get(), mChunkToTransferStart,
-            mBufferResource.Get(), mChunkToTransferStart,
+        context->CopyBufferRegion(
+            mGPUBufferResource, mChunkToTransferStart,
+            mBufferResource, mChunkToTransferStart,
             mChunkToTransferSize
         );
 
@@ -164,9 +160,9 @@ void GPURingBuffer::RecordTransferToGPU()
 
     mChunkToTransferSize = 0;
 
-    barrier.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    barrier.Transition.StateAfter = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
-    mNativeDevice->GetCurrentCommandList()->ResourceBarrier(1, &barrier);
+    context->QueueResourceTransition(mGPUBufferResource, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER);
+    context->SubmitResourceTransitions();
+    mGPUResourceState = D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER;
 }
 
 void GPURingBuffer::SetDebugName(const std::string& name)

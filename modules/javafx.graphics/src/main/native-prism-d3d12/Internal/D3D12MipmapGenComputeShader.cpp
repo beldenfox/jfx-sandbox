@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2025, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -82,7 +82,7 @@ bool MipmapGenComputeShader::PrepareDescriptors(const TextureBank& textures)
     }
 
     const CBuffer* cb = reinterpret_cast<const CBuffer*>(mConstantBufferStorage.data());
-    memcpy(mDescriptorData.ConstantDataDirectRegion.cpu, mConstantBufferStorage.data(), sizeof(CBuffer));
+    memcpy(mDescriptorData.ConstantDataDirectRegion.cpu, cb, sizeof(CBuffer));
 
     // write source mip level as SRV (our input)
     textures[0]->WriteSRVToDescriptor(mDescriptorData.SRVDescriptors.CPU(0), 1, cb->sourceLevel);
@@ -97,11 +97,11 @@ bool MipmapGenComputeShader::PrepareDescriptors(const TextureBank& textures)
     return true;
 }
 
-void MipmapGenComputeShader::ApplyDescriptors(const D3D12GraphicsCommandListPtr& commandList) const
+void MipmapGenComputeShader::CollectDescriptors(Descriptors& descriptors) const
 {
-    commandList->SetComputeRootConstantBufferView(ShaderSlots::COMPUTE_RS_CONSTANT_DATA, mDescriptorData.ConstantDataDirectRegion.gpu);
-    commandList->SetComputeRootDescriptorTable(ShaderSlots::COMPUTE_RS_UAV_DTABLE, mDescriptorData.UAVDescriptors.GPU(0));
-    commandList->SetComputeRootDescriptorTable(ShaderSlots::COMPUTE_RS_TEXTURE_DTABLE, mDescriptorData.SRVDescriptors.GPU(0));
+    descriptors.AddConstantBufferView(ShaderSlots::COMPUTE_RS_CONSTANT_DATA, mDescriptorData.ConstantDataDirectRegion.gpu);
+    descriptors.AddDescriptorTable(ShaderSlots::COMPUTE_RS_UAV_DTABLE, mDescriptorData.UAVDescriptors.GPU(0));
+    descriptors.AddDescriptorTable(ShaderSlots::COMPUTE_RS_TEXTURE_DTABLE, mDescriptorData.SRVDescriptors.GPU(0));
 }
 
 } // namespace Internal

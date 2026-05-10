@@ -121,13 +121,13 @@ public:
     void DeclareComputeRingResources();
     bool PrepareResources();
     bool PrepareComputeResources();
-    void ApplyResources(const D3D12GraphicsCommandListPtr& commandList) const;
-    void ApplyComputeResources(const D3D12GraphicsCommandListPtr& commandList) const;
+    Descriptors CollectDescriptors() const;
+    Descriptors CollectComputeDescriptors() const;
     void ClearTextureUnit(uint32_t slot);
-    void EnsureStates(const D3D12GraphicsCommandListPtr& commandList, D3D12_RESOURCE_STATES state);
     void SetVertexShader(const NIPtr<Shader>& shader);
     void SetPixelShader(const NIPtr<Shader>& shader);
     void SetComputeShader(const NIPtr<Shader>& shader);
+    void SetTextures(const TextureBank& bank);
     void SetTexture(uint32_t slot, const NIPtr<TextureBase>& tex);
 
     void StashParameters();

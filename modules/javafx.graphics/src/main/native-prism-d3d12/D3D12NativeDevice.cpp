@@ -70,102 +70,6 @@ bool NativeDevice::Build2DIndexBuffer()
     return true;
 }
 
-NativeDevice::QuadVertices NativeDevice::AssembleVertexQuadForBlit(const Coords_Box_UINT32& src, const Coords_Box_UINT32& dst)
-{
-    uint32_t srcWidth = src.x1 - src.x0;
-    uint32_t srcHeight = src.y1 - src.y0;
-    uint32_t dstWidth = dst.x1 - dst.x0;
-    uint32_t dstHeight = dst.y1 - dst.y0;
-
-    // default viewport coordinates are from -1 to 1
-    // so destination has to be doubled and shifted from 0-2 range to -1-1 range
-    Coords_UV_FLOAT srcTexelSize{ 1.0f / srcWidth, 1.0f / srcHeight };
-    Coords_UV_FLOAT dstTexelSize{ 2.0f / dstWidth, 2.0f / dstHeight };
-
-    // dstBox V coord is inverted because of d3d12's coordinate system
-    Coords_UV_FLOAT srcBoxTexelsMin{ src.x0 * srcTexelSize.u, src.y0 * srcTexelSize.v };
-    Coords_UV_FLOAT srcBoxTexelsMax{ src.x1 * srcTexelSize.u, src.y1 * srcTexelSize.v };
-    Coords_UV_FLOAT dstBoxTexelsMin{ (dst.x0 * dstTexelSize.u) - 1.0f, (dst.y1 * dstTexelSize.v) - 1.0f };
-    Coords_UV_FLOAT dstBoxTexelsMax{ (dst.x1 * dstTexelSize.u) - 1.0f, (dst.y0 * dstTexelSize.v) - 1.0f };
-
-    QuadVertices result;
-
-    // Build a fullscreen quad used for slow blit path
-    result[0].pos.x = dstBoxTexelsMin.u;
-    result[0].pos.y = dstBoxTexelsMin.v;
-    result[0].uv1.u = srcBoxTexelsMin.u;
-    result[0].uv1.v = srcBoxTexelsMin.v;
-
-    result[1].pos.x = dstBoxTexelsMin.u;
-    result[1].pos.y = dstBoxTexelsMax.v;
-    result[1].uv1.u = srcBoxTexelsMin.u;
-    result[1].uv1.v = srcBoxTexelsMax.v;
-
-    result[2].pos.x = dstBoxTexelsMax.u;
-    result[2].pos.y = dstBoxTexelsMin.v;
-    result[2].uv1.u = srcBoxTexelsMax.u;
-    result[2].uv1.v = srcBoxTexelsMin.v;
-
-    result[3].pos.x = dstBoxTexelsMax.u;
-    result[3].pos.y = dstBoxTexelsMax.v;
-    result[3].uv1.u = srcBoxTexelsMax.u;
-    result[3].uv1.v = srcBoxTexelsMax.v;
-
-    for (uint32_t i = 0; i < result.size(); ++i)
-    {
-        result[i].pos.z = 0.0f;
-        result[i].color.r = 255;
-        result[i].color.g = 255;
-        result[i].color.b = 255;
-        result[i].color.a = 255;
-        result[i].uv2 = result[i].uv1;
-    }
-
-    return result;
-}
-
-// NOTE technically we don't query buffer ptr's size, but this function assumes we reserved enough
-// space already.
-BBox NativeDevice::AssembleVertexData(void* buffer, const Internal::MemoryView<float>& vertices,
-                                      const Internal::MemoryView<signed char>& colors, UINT elementCount)
-{
-    Vertex_2D* bufVertices = reinterpret_cast<Vertex_2D*>(buffer);
-    BBox bbox;
-
-    size_t vertIdx = 0;
-    size_t colorIdx = 0;
-    for (UINT i = 0; i < elementCount; ++i)
-    {
-        D3D12NI_ASSERT(vertIdx < vertices.Size(), "Exceeded vertex array size");
-        D3D12NI_ASSERT(colorIdx < colors.Size(), "Exceeded color array size");
-        bufVertices[i].pos.x = vertices.Data()[vertIdx++];
-        bufVertices[i].pos.y = vertices.Data()[vertIdx++];
-        bufVertices[i].pos.z = vertices.Data()[vertIdx++];
-        bufVertices[i].color.r = colors.Data()[colorIdx++];
-        bufVertices[i].color.g = colors.Data()[colorIdx++];
-        bufVertices[i].color.b = colors.Data()[colorIdx++];
-        bufVertices[i].color.a = colors.Data()[colorIdx++];
-        bufVertices[i].uv1.u = vertices.Data()[vertIdx++];
-        bufVertices[i].uv1.v = vertices.Data()[vertIdx++];
-        bufVertices[i].uv2.u = vertices.Data()[vertIdx++];
-        bufVertices[i].uv2.v = vertices.Data()[vertIdx++];
-    }
-
-    if (elementCount == 4)
-    {
-        // only create a valid bbox when we render a quad
-        // quad is the only way we can be sure bbox is valid
-        // TODO: D3D12: maybe we should lift that limitation some day, would require reworking
-        // bbox merging though and might be too heavy CPU wise
-        for (UINT i = 0; i < elementCount; ++i)
-        {
-            bbox.Merge(bufVertices[i].pos.x, bufVertices[i].pos.y, bufVertices[i].pos.x, bufVertices[i].pos.y);
-        }
-    }
-
-    return bbox;
-}
-
 const NIPtr<Internal::Shader>& NativeDevice::GetPhongPixelShader(const PhongShaderSpec& spec) const
 {
     std::string name(Constants::PHONG_PS_NAME);
@@ -207,60 +111,17 @@ const NIPtr<Internal::Shader>& NativeDevice::GetPhongPixelShader(const PhongShad
     return GetInternalShader(name);
 }
 
-NativeDevice::VertexSubregion NativeDevice::GetNewRegionForVertices(uint32_t vertexCount)
-{
-    if (vertexCount > (Constants::MAX_BATCH_VERTICES / 2))
-    {
-        // rendering more vertices might utilize the Ring Buffer better if we just reserve a separate space for them
-        mVertexRingBuffer->DeclareRequired(vertexCount * 8 * sizeof(float));
-        Internal::GPURingBuffer::GPURegion region = mVertexRingBuffer->ReserveCPU(vertexCount * 8 * sizeof(float));
 
-        VertexSubregion separateRegion;
-        separateRegion.subregion = region.cpuRegion;
-        if (!separateRegion)
-        {
-            D3D12NI_LOG_ERROR("2D Vertex Ring Buffer allocation failed");
-            return VertexSubregion();
-        }
-
-        separateRegion.view.BufferLocation = region.gpuRegion.gpu;
-        separateRegion.view.SizeInBytes = static_cast<UINT>(region.gpuRegion.size);
-        separateRegion.view.StrideInBytes = sizeof(Vertex_2D);
-
-        return separateRegion;
-    }
-
-    if (!m2DVertexBatch.Valid() || vertexCount > m2DVertexBatch.Available())
-    {
-        // reserve space on Ring Buffer
-        mVertexRingBuffer->DeclareRequired(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
-
-        Internal::GPURingBuffer::GPURegion newVertexRegion = mVertexRingBuffer->ReserveCPU(Constants::MAX_BATCH_VERTICES * 8 * sizeof(float));
-        if (!newVertexRegion.cpuRegion)
-        {
-            D3D12NI_LOG_ERROR("2D Vertex Ring Buffer allocation failed");
-            return VertexSubregion();
-        }
-
-        m2DVertexBatch.AssignNewRegion(newVertexRegion.cpuRegion, newVertexRegion.gpuRegion);
-    }
-
-    return m2DVertexBatch.Subregion(vertexCount);
-}
 
 NativeDevice::NativeDevice()
     : mAdapter(nullptr)
     , mDevice()
-    , mCommandQueue()
-    , mFence()
     , mFenceValue(0)
     , mFrameCounter(0)
     , mProfilerTransferWaitSourceID(0)
     , mProfilerFrameTimeID(0)
-    , mProfilerRecordTimeID(0)
     , mMidframeFlushNeeded(false)
     , mWaitableOps()
-    , mCheckpointQueue()
     , mRootSignatureManager()
     , mRenderingContext()
     , mResourceDisposer()
@@ -271,11 +132,8 @@ NativeDevice::NativeDevice()
     , mPhongVS()
     , mCurrent2DShader()
     , m2DCompositeMode()
-    , m2DVertexBatch()
-    , mCommandListPool()
     , m2DIndexBuffer()
     , mRingBuffer()
-    , mVertexRingBuffer()
 {
 }
 
@@ -283,8 +141,6 @@ NativeDevice::~NativeDevice()
 {
     D3D12NI_LOG_DEBUG("Destroying device");
 
-    if (mFence) mFence.Reset();
-    if (mCommandQueue) mCommandQueue.Reset();
     if (mDevice) mDevice.Reset();
     if (mCompositionDevice) mCompositionDevice.Reset();
 
@@ -327,33 +183,7 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
         return false;
     }
 
-    D3D12_COMMAND_QUEUE_DESC cqDesc;
-    D3D12NI_ZERO_STRUCT(cqDesc);
-    cqDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    cqDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
-    cqDesc.Flags = D3D12_COMMAND_QUEUE_FLAG_NONE;
-
-    // TODO Command Queue should probably reside in Command List Pool
-    //      Same with all Execute/Signal logic & checkpoints
-    hr = mDevice->CreateCommandQueue(&cqDesc, IID_PPV_ARGS(&mCommandQueue));
-    D3D12NI_RET_IF_FAILED(hr, false, "Failed to create Direct Command Queue");
-
-    hr = mCommandQueue->SetName(L"Main Command Queue");
-    D3D12NI_RET_IF_FAILED(hr, false, "Failed to name Direct Command Queue");
-
     mFenceValue = 0;
-    hr = mDevice->CreateFence(mFenceValue, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&mFence));
-    D3D12NI_RET_IF_FAILED(hr, false, "Failed to create in-device Fence");
-
-    // NOTE: Command List Pool requires to have as many Command Allocators as SwapChain buffers + 1
-    // This is the minimum we need (one per frame) and also ensures an extra one to pre-record more commands
-    // if both SwapChain buffers are full.
-    mCommandListPool = std::make_shared<Internal::CommandListPool>(shared_from_this());
-    if (!mCommandListPool->Init(D3D12_COMMAND_LIST_TYPE_DIRECT, 16, 3))
-    {
-        D3D12NI_LOG_ERROR("Failed to initialize Command List Pool");
-        return false;
-    }
 
     mRootSignatureManager = std::make_shared<Internal::RootSignatureManager>(shared_from_this());
     if (!mRootSignatureManager->Init())
@@ -381,15 +211,6 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
     if (!mRingBuffer->Init(Internal::Config::MainRingBufferThreshold(), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT))
     {
         D3D12NI_LOG_ERROR("Failed to initialize main Ring Buffer");
-        return false;
-    }
-
-    // TODO adjust thresholds if this idea works fine for memory optimization
-    mVertexRingBuffer = std::make_shared<Internal::GPURingBuffer>(shared_from_this());
-    mVertexRingBuffer->SetDebugName("2D Vertex GPU Ring Buffer");
-    if (!mVertexRingBuffer->Init(Internal::Config::MainRingBufferThreshold(), D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT))
-    {
-        D3D12NI_LOG_ERROR("Failed to initialize 2D Vertex Ring Buffer");
         return false;
     }
 
@@ -425,7 +246,6 @@ bool NativeDevice::Init(IDXGIAdapter1* adapter, const NIPtr<Internal::ShaderLibr
 
     mProfilerTransferWaitSourceID = Internal::Profiler::Instance().RegisterSource("NativeDevice Transfer Wait");
     mProfilerFrameTimeID = Internal::Profiler::Instance().RegisterSource("Frame Time");
-    mProfilerRecordTimeID = Internal::Profiler::Instance().RegisterSource("Record Time");
 
     Internal::Profiler::Instance().TimingStart(mProfilerFrameTimeID);
     return true;
@@ -436,15 +256,17 @@ void NativeDevice::Release()
     D3D12NI_LOG_DEBUG("Releasing Device resources");
 
     // ensures the pipeline is purged
-    mCheckpointQueue.WaitForNextCheckpoint(CheckpointType::ALL);
+    mRenderingContext->WaitForNextCheckpoint(CheckpointType::ALL);
 
     mWaitableOps.clear();
 
-    if (mRenderingContext) mRenderingContext.reset();
-    if (mRingBuffer) mRingBuffer.reset();
-    if (mVertexRingBuffer) mVertexRingBuffer.reset();
+    if (mRenderingContext)
+    {
+        mRenderingContext->Release();
+        mRenderingContext.reset();
+    }
+
     if (m2DIndexBuffer) m2DIndexBuffer.reset();
-    if (mCommandListPool) mCommandListPool.reset();
     if (mShaderLibrary) mShaderLibrary.reset();
     if (mRTVAllocator) mRTVAllocator.reset();
     if (mDSVAllocator) mDSVAllocator.reset();
@@ -563,7 +385,7 @@ void NativeDevice::ClearTextureUnit(uint32_t unit)
 }
 
 void NativeDevice::RenderQuads(const Internal::MemoryView<float>& vertices, const Internal::MemoryView<signed char>& colors,
-                               UINT vertexCount)
+                               uint32_t vertexCount)
 {
     // vertex count size check, also serves as an overflow check
     if (vertexCount > Constants::MAX_BATCH_VERTICES)
@@ -583,7 +405,6 @@ void NativeDevice::RenderQuads(const Internal::MemoryView<float>& vertices, cons
     // TODO this SetConstants call should be done more efficiently ie. only when transforms change
     Internal::Matrix<float> wvp = mTransforms.viewProjTransform.Mul(mTransforms.worldTransform);
     mPassthroughVS->SetConstants("WorldViewProj", wvp.Data(), sizeof(Internal::Matrix<float>));
-    mRenderingContext->ClearResourcesApplied();
 
     mRenderingContext->SetCompositeMode(m2DCompositeMode);
     mRenderingContext->SetVertexShader(mPassthroughVS);
@@ -591,23 +412,16 @@ void NativeDevice::RenderQuads(const Internal::MemoryView<float>& vertices, cons
     mRenderingContext->SetCullMode(D3D12_CULL_MODE_NONE);
     mRenderingContext->SetFillMode(D3D12_FILL_MODE_SOLID);
 
-    // move data to our Ring Buffer
-    VertexSubregion vertexRegion = GetNewRegionForVertices(vertexCount);
-    if (!vertexRegion) return;
-
-    BBox dirtyBBox = AssembleVertexData(vertexRegion.subregion.cpu, vertices, colors, vertexCount);
-    mRenderingContext->SetVertexBuffer(vertexRegion.view);
-
-    Internal::Profiler::Instance().TimingStart(mProfilerRecordTimeID);
+    // TODO - maybe it would make more sense to merge this Set into "DrawQuads" in RenderingContext
+    uint32_t vbOffset = 0;
+    BBox dirtyBBox = mRenderingContext->SetVertexBufferForQuads(vertices, colors, vertexCount, vbOffset);
 
     // draw the quads converting vertexCount to indexCount - 1 quad is 4 vertices, or 6 indices
-    mRenderingContext->Draw((vertexCount / 4) * 6, vertexRegion.startOffset, dirtyBBox);
-
-    Internal::Profiler::Instance().TimingEnd(mProfilerRecordTimeID);
+    mRenderingContext->Draw((vertexCount / 4) * 6, vbOffset, dirtyBBox);
 
     if (mMidframeFlushNeeded)
     {
-        FlushCommandList(CheckpointType::MIDFRAME);
+        mRenderingContext->FlushCommandList(CheckpointType::MIDFRAME);
         mMidframeFlushNeeded = false;
     }
 }
@@ -639,7 +453,6 @@ void NativeDevice::RenderMeshView(const NIPtr<NativeMeshView>& meshView)
 
     mPhongVS->SetConstants("gData", &mTransforms, sizeof(Transforms));
     ps->SetConstants("gColor", &meshView->GetPSColorSpec(), sizeof(PSColorSpec));
-    mRenderingContext->ClearResourcesApplied();
 
     const NIPtr<NativeMesh>& mesh = meshView->GetMesh();
 
@@ -664,15 +477,11 @@ void NativeDevice::RenderMeshView(const NIPtr<NativeMeshView>& meshView)
         mRenderingContext->SetTexture(i, material->GetMap(static_cast<TextureMapType>(i)));
     }
 
-    Internal::Profiler::Instance().TimingStart(mProfilerRecordTimeID);
-
     mRenderingContext->Draw(mesh->GetIndexCount(), 0);
-
-    Internal::Profiler::Instance().TimingEnd(mProfilerRecordTimeID);
 
     if (mMidframeFlushNeeded)
     {
-        FlushCommandList(CheckpointType::MIDFRAME);
+        mRenderingContext->FlushCommandList(CheckpointType::MIDFRAME);
         mMidframeFlushNeeded = false;
     }
 }
@@ -710,14 +519,7 @@ void NativeDevice::SetScissor(bool enabled, int x1, int y1, int x2, int y2)
 
 bool NativeDevice::SetShaderConstants(const NIPtr<NativeShader>& shader, const std::string& name, const void* data, size_t size)
 {
-    bool ret = shader->SetConstants(name, data, size);
-
-    if (ret)
-    {
-        mRenderingContext->ClearResourcesApplied();
-    }
-
-    return ret;
+    return shader->SetConstants(name, data, size);
 }
 
 void NativeDevice::SetTexture(uint32_t unit, const NIPtr<NativeTexture>& texture)
@@ -763,51 +565,12 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
     {
         if (srcRT->GetMSAASamples() == 1)
         {
-            D3D12_TEXTURE_COPY_LOCATION srcLoc;
-            D3D12NI_ZERO_STRUCT(srcLoc);
-            srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            srcLoc.pResource = srcRT->GetTexture()->GetResource().Get();
-            srcLoc.SubresourceIndex = 0;
-
-            D3D12_BOX srcBox;
-            D3D12NI_ZERO_STRUCT(srcBox);
-            srcBox.left = src.x0;
-            srcBox.top = src.y0;
-            srcBox.right = src.x1;
-            srcBox.bottom = src.y1;
-            srcBox.front = 0;
-            srcBox.back = 1;
-
-            D3D12_TEXTURE_COPY_LOCATION dstLoc;
-            D3D12NI_ZERO_STRUCT(dstLoc);
-            dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-            dstLoc.pResource = dstRT->GetTexture()->GetResource().Get();
-            dstLoc.SubresourceIndex = 0;
-
-            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_SOURCE);
-            mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_COPY_DEST);
-            mRenderingContext->SubmitTextureTransitions();
-
-            GetCurrentCommandList()->CopyTextureRegion(&dstLoc, dst.x0, dst.y0, 0, &srcLoc, &srcBox);
+            mRenderingContext->CopyTexture(dstRT->GetTexture(), dst.x0, dst.y0, srcRT->GetTexture(), src.x0, src.y0, srcWidth, srcHeight);
         }
         else
         {
             // use ResolveSubresourceRegion
-            D3D12_RECT srcRect;
-            srcRect.left = src.x0;
-            srcRect.top = src.y0;
-            srcRect.right = src.x1;
-            srcRect.bottom = src.y1;
-
-            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
-            mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_DEST);
-            mRenderingContext->SubmitTextureTransitions();
-
-            GetCurrentCommandList()->ResolveSubresourceRegion(
-                dstRT->GetTexture()->GetResource().Get(), 0, dst.x0, dst.y0,
-                srcRT->GetTexture()->GetResource().Get(), 0, &srcRect,
-                dstRT->GetFormat(), D3D12_RESOLVE_MODE_AVERAGE
-            );
+            mRenderingContext->ResolveRegion(dstRT->GetTexture(), dst.x0, dst.y0, srcRT->GetTexture(), src.x0, src.y0, srcWidth, srcHeight, dstRT->GetFormat());
         }
     }
     else
@@ -826,15 +589,7 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
                 return false;
             }
 
-            mRenderingContext->QueueTextureTransition(srcRT->GetTexture(), D3D12_RESOURCE_STATE_RESOLVE_SOURCE);
-            mRenderingContext->QueueTextureTransition(intermediateTexture, D3D12_RESOURCE_STATE_RESOLVE_DEST);
-            mRenderingContext->SubmitTextureTransitions();
-
-            GetCurrentCommandList()->ResolveSubresource(
-                intermediateTexture->GetResource().Get(), 0,
-                srcRT->GetTexture()->GetResource().Get(), 0, srcRT->GetFormat()
-            );
-
+            mRenderingContext->Resolve(intermediateTexture, srcRT->GetTexture(), srcRT->GetFormat());
             sourceTexture = intermediateTexture;
         }
         else
@@ -865,26 +620,11 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
         mRenderingContext->SetCompositeMode(CompositeMode::SRC);
 
         // prepare quad vertices for blitting
-        QuadVertices fsQuad = AssembleVertexQuadForBlit(src, dst);
+        // TODO - maybe it would make more sense to merge this into "DrawBlitQuad" in RenderingContext
+        uint32_t vbOffset = 0;
+        BBox box = mRenderingContext->SetVertexBufferForBlit(src, dst, vbOffset);
 
-        VertexSubregion vertexRegion = GetNewRegionForVertices(static_cast<uint32_t>(fsQuad.size()));
-        if (!vertexRegion) return false;
-
-        memcpy(vertexRegion.subregion.cpu, fsQuad.data(), fsQuad.size() * sizeof(Vertex_2D));
-
-        mRenderingContext->SetVertexBuffer(vertexRegion.view);
-
-        mRenderingContext->QueueTextureTransition(sourceTexture, D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
-        mRenderingContext->QueueTextureTransition(dstRT->GetTexture(), D3D12_RESOURCE_STATE_RENDER_TARGET);
-        mRenderingContext->SubmitTextureTransitions();
-
-        BBox box;
-        for (uint32_t i = 0; i < fsQuad.size(); ++i)
-        {
-            box.Merge(fsQuad[i].pos.x, fsQuad[i].pos.y, fsQuad[i].pos.x, fsQuad[i].pos.y);
-        }
-
-        mRenderingContext->Draw(6, vertexRegion.startOffset, box);
+        mRenderingContext->Draw(6, vbOffset, box);
 
         // restore original context parameters
         mRenderingContext->RestoreStashedParameters();
@@ -894,7 +634,7 @@ bool NativeDevice::Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box
 }
 
 bool NativeDevice::ReadTexture(const NIPtr<NativeTexture>& texture, void* buffer, size_t bufferSize,
-                               UINT srcx, UINT srcy, UINT srcw, UINT srch)
+                               uint32_t srcx, uint32_t srcy, uint32_t srcw, uint32_t srch)
 {
     DXGI_FORMAT format = texture->GetFormat();
     size_t bpp = GetDXGIFormatBPP(format);
@@ -913,40 +653,12 @@ bool NativeDevice::ReadTexture(const NIPtr<NativeTexture>& texture, void* buffer
         return false;
     }
 
-    D3D12_TEXTURE_COPY_LOCATION srcLoc;
-    D3D12NI_ZERO_STRUCT(srcLoc);
-    srcLoc.pResource = texture->GetResource().Get();
-    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    srcLoc.SubresourceIndex = 0;
-
-    D3D12_BOX srcBox;
-    srcBox.left = srcx;
-    srcBox.top = srcy;
-    srcBox.right = srcx + srcw;
-    srcBox.bottom = srcy + srch;
-    srcBox.front = 0;
-    srcBox.back = 1;
-
-    D3D12_TEXTURE_COPY_LOCATION dstLoc;
-    D3D12NI_ZERO_STRUCT(dstLoc);
-    dstLoc.pResource = readbackBuffer.GetResource().Get();
-    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    dstLoc.PlacedFootprint.Footprint.Width = srcw;
-    dstLoc.PlacedFootprint.Footprint.Height = srch;
-    dstLoc.PlacedFootprint.Footprint.Depth = 1;
-    dstLoc.PlacedFootprint.Footprint.RowPitch = static_cast<UINT>(readbackStride);
-    dstLoc.PlacedFootprint.Footprint.Format = format;
-    dstLoc.PlacedFootprint.Offset = 0;
-
-    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    mRenderingContext->SubmitTextureTransitions();
-
-    GetCurrentCommandList()->CopyTextureRegion(&dstLoc, 0, 0, 0, &srcLoc, &srcBox);
+    mRenderingContext->CopyTexture(readbackBuffer, static_cast<uint32_t>(readbackStride), texture, srcx, srcy, srcw, srch);
 
     // Flush the Command Queue to ensure data was read and wait for itF
     Internal::Profiler::Instance().MarkEvent(mProfilerTransferWaitSourceID, Internal::Profiler::Event::Wait);
-    FlushCommandList(CheckpointType::TRANSFER);
-    mCheckpointQueue.WaitForNextCheckpoint(CheckpointType::TRANSFER);
+    mRenderingContext->FlushCommandList(CheckpointType::TRANSFER);
+    mRenderingContext->WaitForNextCheckpoint(CheckpointType::TRANSFER);
 
     void* readbackPtr = readbackBuffer.Map();
     if (readbackPtr == nullptr)
@@ -987,72 +699,8 @@ bool NativeDevice::ReadTexture(const NIPtr<NativeTexture>& texture, void* buffer
     return true;
 }
 
-bool NativeDevice::GenerateMipmaps(const NIPtr<NativeTexture>& texture)
-{
-    if (!texture->HasMipmaps()) return true;
-
-    uint32_t mipLevels = texture->GetMipLevels();
-
-    const NIPtr<Internal::Shader>& cs = GetInternalShader("MipmapGenCS");
-    mRenderingContext->SetComputeShader(cs);
-    mRenderingContext->SetTexture(0, texture);
-
-    uint32_t srcWidth = static_cast<uint32_t>(texture->GetWidth());
-    uint32_t srcHeight = static_cast<uint32_t>(texture->GetHeight());
-
-    // transition entire texture with mips to UAV state
-    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-    mRenderingContext->SubmitTextureTransitions();
-
-    // starting from 1, level 0 is our base mip level
-    // also note, we're divinding by 2 a lot, so to make it faster we'll bit-shift instead
-    Internal::MipmapGenComputeShader::CBuffer constants;
-    uint32_t mipMapCount = mipLevels - 1; // mipLevels includes base level so we need to skip it
-    for (uint32_t mipBase = 0; mipBase < mipMapCount; mipBase += constants.numLevels)
-    {
-        // dimensions of first mipmap
-        uint32_t mip1Width = (srcWidth >> 1);
-        uint32_t mip1Height = (srcHeight >> 1);
-
-        // check how many times we can downsample at once
-        // we guarantee at least one downsample (MipmapGenCS has the initial "heavy" path for that purpose)
-        // but if both mip1Width and mip1Height have any zero-LSBs past that, we can do more downsamples within
-        // one dispatch and save some CS invocations. Worst case scenario our texture dimensions have all LSB
-        // bits set to 1, but it is an extremely rare occurence.
-        uint32_t widthZeros = Internal::Utils::CountZeroBitsLSB(mip1Width, 3);
-        uint32_t heightZeros = Internal::Utils::CountZeroBitsLSB(mip1Height, 3);
-        uint32_t levels = 1 + std::min<uint32_t>(widthZeros, heightZeros);
-
-        constants.sourceLevel = mipBase; // base level is one higher than our first mip
-        constants.numLevels = std::min<uint32_t>(levels, mipMapCount - mipBase);
-        constants.texelSizeMip1[0] = 1.0f / mip1Width;
-        constants.texelSizeMip1[1] = 1.0f / mip1Height;
-        cs->SetConstants("gData", &constants, sizeof(constants));
-
-        mRenderingContext->ClearComputeResourcesApplied();
-
-        // transition base level to non-PS-resource
-        mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                               Internal::Utils::CalcSubresource(mipBase, texture->GetMipLevels(), 0));
-
-        // each thread group manages an 8x8 square, so we need to dispatch (width/8) X groups and (height/8) Y groups
-        mRenderingContext->SubmitTextureTransitions();
-        mRenderingContext->Dispatch(std::max<UINT>(srcWidth >> 3, 1), std::max<UINT>(srcHeight >> 3, 1), 1);
-
-        // transition base level back to UAV
-        // this should make all subresources have the same state again
-        mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                               Internal::Utils::CalcSubresource(mipBase, texture->GetMipLevels(), 0));
-
-        srcWidth >>= constants.numLevels;
-        srcHeight >>= constants.numLevels;
-    }
-
-    return true;
-}
-
 bool NativeDevice::UpdateTexture(const NIPtr<NativeTexture>& texture, const void* data, size_t dataSizeBytes, PixelFormat srcFormat,
-                                 UINT dstx, UINT dsty, UINT srcx, UINT srcy, UINT srcw, UINT srch, UINT srcstride)
+                                 uint32_t dstx, uint32_t dsty, uint32_t srcx, uint32_t srcy, uint32_t srcw, uint32_t srch, uint32_t srcstride)
 {
     size_t targetSize = Internal::TextureUploader::EstimateTargetSize(srcw, srch, texture->GetFormat());
 
@@ -1104,92 +752,25 @@ bool NativeDevice::UpdateTexture(const NIPtr<NativeTexture>& texture, const void
         stagingBuffer.Unmap();
     }
 
-    // now we can record a data move from staging or Ring Buffer to our Texture
-    D3D12_TEXTURE_COPY_LOCATION srcLoc;
-    D3D12NI_ZERO_STRUCT(srcLoc);
-    srcLoc.pResource = useStagingBuffer ? stagingBuffer.GetResource().Get() : mRingBuffer->GetResource().Get();
-    srcLoc.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
-    srcLoc.PlacedFootprint.Footprint.Width = srcw;
-    srcLoc.PlacedFootprint.Footprint.Height = srch;
-    srcLoc.PlacedFootprint.Footprint.Depth = 1;
-    srcLoc.PlacedFootprint.Footprint.RowPitch = uploader.GetTargetStride();
-    srcLoc.PlacedFootprint.Footprint.Format = uploader.GetTargetFormat();
-    srcLoc.PlacedFootprint.Offset = useStagingBuffer ? 0 : ringRegion.offsetFromStart;
+    mRenderingContext->CopyToTexture(
+        texture, dstx, dsty,
+        useStagingBuffer ? stagingBuffer.GetResource().Get() : mRingBuffer->GetResource().Get(), srcw, srch,
+        useStagingBuffer ? 0 : ringRegion.offsetFromStart, uploader.GetTargetStride(), uploader.GetTargetFormat()
+    );
 
-    D3D12_TEXTURE_COPY_LOCATION dstLoc;
-    D3D12NI_ZERO_STRUCT(dstLoc);
-    dstLoc.pResource = texture->GetResource().Get();
-    dstLoc.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-    dstLoc.SubresourceIndex = 0;
-
-    // Ensure we are in COPY_DEST state. Texture can be now bound to RenderingContext
-    // and exist in a different state.
-    mRenderingContext->QueueTextureTransition(texture, D3D12_RESOURCE_STATE_COPY_DEST);
-    mRenderingContext->SubmitTextureTransitions();
-
-    GetCurrentCommandList()->CopyTextureRegion(&dstLoc, dstx, dsty, 0, &srcLoc, nullptr);
-
-    GenerateMipmaps(texture);
+    mRenderingContext->GenerateMipmaps(texture);
 
     return true;
 }
 
-// private
-void NativeDevice::ExecuteCurrentCommandList()
-{
-    // we query for this before Pool::AdvanceCommandList() because advancing
-    // the Command List will flush the buffer and we need this information afterwards
-    bool needsGPUVertexBufferUpdate = mVertexRingBuffer->HasUncommittedData();
-
-    D3D12GraphicsCommandListPtr cmdList = mCommandListPool->AdvanceCommandList();
-    if (needsGPUVertexBufferUpdate)
-    {
-        mVertexRingBuffer->RecordTransferToGPU();
-        D3D12GraphicsCommandListPtr copyVertexBufferList = mCommandListPool->AdvanceCommandList();
-
-        // Copy vertex buffer list must happen before just-recorded list, this is
-        // to ensure the copy will be executed first. This lets the driver merge the
-        // lists and parallelize them better. Synchronization will be done via barriers.
-        ID3D12CommandList* lists[2] = { copyVertexBufferList.Get(), cmdList.Get() };
-        mCommandQueue->ExecuteCommandLists(2, lists);
-    }
-    else
-    {
-        // GPU vertex ring buffer was not used, we don't need to transfer any data
-        // simply submit this Command List for execution and move on
-        ID3D12CommandList* lists[1] = { cmdList.Get() };
-        mCommandQueue->ExecuteCommandLists(1, lists);
-    }
-}
-
-void NativeDevice::FlushCommandList(CheckpointType type)
-{
-    ExecuteCurrentCommandList();
-    Signal(type);
-
-    mRenderingContext->ClearAppliedFlags();
-    m2DVertexBatch.Invalidate();
-}
-
 void NativeDevice::FinishFrame()
 {
-    // Not calling FlushCommandList() here to avoid Signal()
-    // SwapChain will execute Signal on its own to mark the actual end of the frame
-    ExecuteCurrentCommandList();
-
-    mRenderingContext->ClearAppliedFlags();
     mRenderingContext->FinishFrame();
-    m2DVertexBatch.Invalidate();
 
     mFrameCounter++;
     Internal::Profiler::Instance().MarkFrameEnd();
     Internal::Profiler::Instance().TimingEnd(mProfilerFrameTimeID);
     Internal::Profiler::Instance().TimingStart(mProfilerFrameTimeID);
-}
-
-void NativeDevice::AdvanceCommandAllocator()
-{
-    mCommandListPool->AdvanceAllocator();
 }
 
 void NativeDevice::RegisterWaitableOperation(Internal::IWaitableOperation* waitableOp)
@@ -1236,13 +817,7 @@ uint64_t NativeDevice::Signal(CheckpointType type)
         return true;
     });
 
-    HRESULT hr = mCommandQueue->Signal(mFence.Get(), mFenceValue);
-    D3D12NI_RET_IF_FAILED(hr, 0, "Failed to signal event on completion");
-
-    hr = mFence->SetEventOnCompletion(mFenceValue, waitable.GetHandle());
-    D3D12NI_RET_IF_FAILED(hr, 0, "Failed to set Fence event on completion");
-
-    mCheckpointQueue.AddCheckpoint(type, std::move(waitable));
+    mRenderingContext->Signal(mFenceValue, type, std::move(waitable));
     return mFenceValue;
 }
 

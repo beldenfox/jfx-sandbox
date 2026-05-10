@@ -51,9 +51,6 @@ bool ResourceManager::PrepareConstants(const NIPtr<Shader>& shader)
             D3D12NI_LOG_ERROR("Failed to reserve Constant Ring Buffer space for direct constant data");
             return false;
         }
-
-        // We don't create a direct CBV here, instead it is created when calling ID3D12CommandList::SetGraphicsRootConstantBufferView()
-        // so this is Shader's responsibility to be done in ApplyDescriptors(commandList)
     }
 
     if (resourceData.cbufferDTableCount > 0)
@@ -89,6 +86,7 @@ bool ResourceManager::PrepareConstants(const NIPtr<Shader>& shader)
         }
     }
 
+    shader->SetConstantsDirty(false);
     return true;
 }
 
@@ -195,6 +193,9 @@ ResourceManager::ResourceManager(const NIPtr<NativeDevice>& nativeDevice)
     , mDescriptorHeap(nativeDevice)
     , mSamplerHeap(nativeDevice)
     , mConstantRingBuffer(nativeDevice)
+    , mCurrentSamplerBinding()
+    , mLastSamplerDescriptors()
+    , mSamplerRegionReserveProfilerID(UINT32_MAX)
 {
     mNativeDevice->RegisterWaitableOperation(this);
     mSamplerRegionReserveProfilerID = Profiler::Instance().RegisterSource("ResourceManager Sampler Region Reserve");
@@ -300,10 +301,14 @@ bool ResourceManager::PrepareResources()
     return true;
 }
 
-void ResourceManager::ApplyResources(const D3D12GraphicsCommandListPtr& commandList) const
+Descriptors ResourceManager::CollectDescriptors() const
 {
-    mVertexShader->ApplyDescriptors(commandList);
-    mPixelShader->ApplyDescriptors(commandList);
+    Descriptors descriptors;
+
+    mVertexShader->CollectDescriptors(descriptors);
+    mPixelShader->CollectDescriptors(descriptors);
+
+    return descriptors;
 }
 
 void ResourceManager::DeclareComputeRingResources()
@@ -327,9 +332,13 @@ bool ResourceManager::PrepareComputeResources()
     return PrepareShaderResources(mComputeShader);
 }
 
-void ResourceManager::ApplyComputeResources(const D3D12GraphicsCommandListPtr& commandList) const
+Descriptors ResourceManager::CollectComputeDescriptors() const
 {
-    mComputeShader->ApplyDescriptors(commandList);
+    Descriptors descriptors;
+
+    mComputeShader->CollectDescriptors(descriptors);
+
+    return descriptors;
 }
 
 void ResourceManager::ClearTextureUnit(uint32_t slot)
@@ -337,19 +346,6 @@ void ResourceManager::ClearTextureUnit(uint32_t slot)
     D3D12NI_ASSERT(slot < Constants::MAX_TEXTURE_UNITS, "Provided too high slot %u (max %u)", slot, Constants::MAX_TEXTURE_UNITS);
 
     mTextures[slot].reset();
-}
-
-void ResourceManager::EnsureStates(const D3D12GraphicsCommandListPtr& commandList, D3D12_RESOURCE_STATES state)
-{
-    for (uint32_t i = 0; i < Constants::MAX_TEXTURE_UNITS; ++i)
-    {
-        if (mTextures[i])
-        {
-            mNativeDevice->GetRenderingContext()->QueueTextureTransition(mTextures[i], state);
-        }
-    }
-
-    mNativeDevice->GetRenderingContext()->SubmitTextureTransitions();
 }
 
 void ResourceManager::SetVertexShader(const NIPtr<Shader>& shader)
@@ -363,7 +359,6 @@ void ResourceManager::SetVertexShader(const NIPtr<Shader>& shader)
     }
 
     mVertexShader = shader;
-    mVertexShader->SetConstantsDirty(true);
 }
 
 void ResourceManager::SetPixelShader(const NIPtr<Shader>& shader)
@@ -377,7 +372,6 @@ void ResourceManager::SetPixelShader(const NIPtr<Shader>& shader)
     }
 
     mPixelShader = shader;
-    mPixelShader->SetConstantsDirty(true);
 }
 
 void ResourceManager::SetComputeShader(const NIPtr<Shader>& shader)
@@ -391,7 +385,14 @@ void ResourceManager::SetComputeShader(const NIPtr<Shader>& shader)
     }
 
     mComputeShader = shader;
-    mComputeShader->SetConstantsDirty(true);
+}
+
+void ResourceManager::SetTextures(const TextureBank& bank)
+{
+    for (uint32_t i = 0; i < bank.size(); ++i)
+    {
+        SetTexture(i, bank[i]);
+    }
 }
 
 void ResourceManager::SetTexture(uint32_t slot, const NIPtr<TextureBase>& tex)

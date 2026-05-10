@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2024, 2025, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2024, 2026, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -226,18 +226,18 @@ bool NativeShader::PrepareDescriptors(const Internal::TextureBank& textures)
     return true;
 }
 
-void NativeShader::ApplyDescriptors(const D3D12GraphicsCommandListPtr& commandList) const
+void NativeShader::CollectDescriptors(Descriptors& descriptors) const
 {
     // NativeShaders are always Pixel shaders
     if (mResourceData.textureCount > 0)
     {
-        commandList->SetGraphicsRootDescriptorTable(ShaderSlots::GRAPHICS_RS_PS_TEXTURE_DTABLE, mDescriptorData.SRVDescriptors.gpu);
-        commandList->SetGraphicsRootDescriptorTable(ShaderSlots::GRAPHICS_RS_PS_SAMPLER_DTABLE, mDescriptorData.SamplerDescriptors.gpu);
+        descriptors.AddDescriptorTable(ShaderSlots::GRAPHICS_RS_PS_TEXTURE_DTABLE, mDescriptorData.SRVDescriptors.gpu);
+        descriptors.AddDescriptorTable(ShaderSlots::GRAPHICS_RS_PS_SAMPLER_DTABLE, mDescriptorData.SamplerDescriptors.gpu);
     }
 
     if (mDescriptorData.ConstantDataDirectRegion)
     {
-        commandList->SetGraphicsRootConstantBufferView(ShaderSlots::GRAPHICS_RS_PS_DATA, mDescriptorData.ConstantDataDirectRegion.gpu);
+        descriptors.AddConstantBufferView(ShaderSlots::GRAPHICS_RS_PS_DATA, mDescriptorData.ConstantDataDirectRegion.gpu);
     }
 }
 

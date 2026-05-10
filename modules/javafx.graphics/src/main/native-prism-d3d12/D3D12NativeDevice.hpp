@@ -39,7 +39,6 @@
 #include "Internal/D3D12CheckpointQueue.hpp"
 #include "Internal/D3D12CommandListPool.hpp"
 #include "Internal/D3D12DescriptorAllocator.hpp"
-#include "Internal/D3D12GPURingBuffer.hpp"
 #include "Internal/D3D12IWaitableOperation.hpp"
 #include "Internal/D3D12RootSignatureManager.hpp"
 #include "Internal/D3D12ResourceDisposer.hpp"
@@ -61,104 +60,17 @@ namespace D3D12 {
 
 class NativeDevice: public std::enable_shared_from_this<NativeDevice>
 {
-    using QuadVertices = std::array<Vertex_2D, 4>;
-
-    struct VertexSubregion
-    {
-        uint32_t startOffset; // counted in vertices since start of entire region
-        Internal::RingBuffer::Region subregion;
-        D3D12_VERTEX_BUFFER_VIEW view;
-
-        VertexSubregion()
-            : startOffset(0)
-            , subregion()
-            , view()
-        {}
-
-        operator bool() const
-        {
-            return subregion.operator bool();
-        }
-    };
-
-    class VertexBatch
-    {
-        uint32_t mTaken;
-        Internal::RingBuffer::Region mCPURegion;
-        Internal::RingBuffer::Region mGPURegion;
-        D3D12_VERTEX_BUFFER_VIEW mView;
-
-        size_t ElementsToBytes(size_t elements)
-        {
-            return elements * sizeof(Vertex_2D);
-        }
-
-    public:
-        VertexBatch()
-            : mTaken(0)
-            , mCPURegion()
-            , mGPURegion()
-            , mView()
-        {}
-
-        inline uint32_t Available() const
-        {
-            return (Constants::MAX_BATCH_VERTICES - mTaken);
-        }
-
-        inline bool Valid() const
-        {
-            return mCPURegion.operator bool();
-        }
-
-        inline void Invalidate()
-        {
-            mCPURegion = Internal::RingBuffer::Region();
-            mGPURegion = Internal::RingBuffer::Region();
-            mTaken = 0;
-            D3D12NI_ZERO_STRUCT(mView);
-        }
-
-        void AssignNewRegion(const Internal::RingBuffer::Region& cpuRegion, const Internal::RingBuffer::Region& gpuRegion)
-        {
-            mCPURegion = cpuRegion;
-            mGPURegion = gpuRegion;
-            mTaken = 0;
-
-            mView.BufferLocation = gpuRegion.gpu;
-            mView.SizeInBytes = static_cast<UINT>(gpuRegion.size);
-            mView.StrideInBytes = sizeof(Vertex_2D); // 3x pos, 1x uint32 color, 2x uv, 2x uv
-        }
-
-        VertexSubregion Subregion(uint32_t elements)
-        {
-            D3D12NI_ASSERT(elements <= (Constants::MAX_BATCH_VERTICES - mTaken), "Attempted to exceed VB Batch size");
-            D3D12NI_ASSERT(mCPURegion == true, "No assigned vertex buffer region");
-
-            VertexSubregion result;
-            result.subregion = mCPURegion.Subregion(ElementsToBytes(mTaken), ElementsToBytes(elements));
-            result.startOffset = mTaken;
-            result.view = mView;
-
-            mTaken += elements;
-            return result;
-        }
-    };
-
     IDXGIAdapter1* mAdapter;
     D3D12DevicePtr mDevice;
-    D3D12CommandQueuePtr mCommandQueue;
-    D3D12FencePtr mFence;
     CompositionDevicePtr mCompositionDevice;
+
     uint32_t mFenceValue;
     uint32_t mFrameCounter; // for debugging ex. triggering a breakpoint after X frames
     uint32_t mProfilerTransferWaitSourceID;
     uint32_t mProfilerFrameTimeID;
-    uint32_t mProfilerRecordTimeID;
     bool mMidframeFlushNeeded;
     std::vector<Internal::IWaitableOperation*> mWaitableOps;
 
-    Internal::CheckpointQueue mCheckpointQueue;
     NIPtr<Internal::RootSignatureManager> mRootSignatureManager;
     NIPtr<Internal::RenderingContext> mRenderingContext;
     NIPtr<Internal::ResourceDisposer> mResourceDisposer;
@@ -170,11 +82,8 @@ class NativeDevice: public std::enable_shared_from_this<NativeDevice>
     NIPtr<Internal::Shader> mPhongVS;
     NIPtr<Internal::Shader> mCurrent2DShader;
     CompositeMode m2DCompositeMode;
-    VertexBatch m2DVertexBatch;
-    NIPtr<Internal::CommandListPool> mCommandListPool;
     NIPtr<Internal::Buffer> m2DIndexBuffer;
-    NIPtr<Internal::RingBuffer> mRingBuffer; // used for larger read-once-by-GPU data (ex. texture upload)
-    NIPtr<Internal::GPURingBuffer> mVertexRingBuffer; // used for 2D Vertex data which for performance should reside on GPU-side
+    NIPtr<Internal::RingBuffer> mRingBuffer; // used for smaller read-once-by-GPU data (ex. texture upload)
 
     struct Transforms
     {
@@ -184,13 +93,7 @@ class NativeDevice: public std::enable_shared_from_this<NativeDevice>
     } mTransforms;
 
     bool Build2DIndexBuffer();
-    BBox AssembleVertexData(void* buffer, const Internal::MemoryView<float>& vertices,
-                            const Internal::MemoryView<signed char>& colors, UINT elementCount);
-    QuadVertices AssembleVertexQuadForBlit(const Coords_Box_UINT32& src, const Coords_Box_UINT32& dst);
     const NIPtr<Internal::Shader>& GetPhongPixelShader(const PhongShaderSpec& spec) const;
-    VertexSubregion GetNewRegionForVertices(uint32_t elementCount);
-    D3D12GraphicsCommandListPtr CopyVertexDataToGPU(uint64_t offset, uint64_t size);
-    void ExecuteCurrentCommandList();
 
 public:
     NativeDevice();
@@ -218,7 +121,7 @@ public:
     void Clear(float r, float g, float b, float a, bool clearDepth);
     void ClearTextureUnit(uint32_t unit);
     void RenderQuads(const Internal::MemoryView<float>& vertices, const Internal::MemoryView<signed char>& colors,
-                     UINT vertexCount);
+                     uint32_t vertexCount);
     void RenderMeshView(const NIPtr<NativeMeshView>& meshView);
     void SetCompositeMode(CompositeMode mode);
     void UnsetPixelShader();
@@ -233,14 +136,11 @@ public:
     bool Blit(const NIPtr<NativeRenderTarget>& srcRT, const Coords_Box_UINT32& src,
               const NIPtr<Internal::IRenderTarget>& dstRT, const Coords_Box_UINT32& dst);
     bool ReadTexture(const NIPtr<NativeTexture>& texture, void* buffer, size_t pixelCount,
-                     UINT srcx, UINT srcy, UINT srcw, UINT srch);
-    bool GenerateMipmaps(const NIPtr<NativeTexture>& texture);
+                     uint32_t srcx, uint32_t srcy, uint32_t srcw, uint32_t srch);
     bool UpdateTexture(const NIPtr<NativeTexture>& texture, const void* data, size_t pixelCount, PixelFormat srcFormat,
-                       UINT dstx, UINT dsty, UINT srcx, UINT srcy, UINT srcw, UINT srch, UINT srcstride);
+                       uint32_t dstx, uint32_t dsty, uint32_t srcx, uint32_t srcy, uint32_t srcw, uint32_t srch, uint32_t srcstride);
 
     void FinishFrame();
-    void FlushCommandList(CheckpointType type);
-    void AdvanceCommandAllocator();
     void RegisterWaitableOperation(Internal::IWaitableOperation* waitableOp);
     void UnregisterWaitableOperation(Internal::IWaitableOperation* waitableOp);
 
@@ -257,26 +157,6 @@ public:
     const CompositionDevicePtr& GetCompositionDevice()
     {
         return mCompositionDevice;
-    }
-
-    Internal::CheckpointQueue& GetCheckpointQueue()
-    {
-        return mCheckpointQueue;
-    }
-
-    const D3D12CommandQueuePtr& GetCommandQueue()
-    {
-        return mCommandQueue;
-    }
-
-    const D3D12GraphicsCommandListPtr& GetCurrentCommandList()
-    {
-        return mCommandListPool->CurrentCommandList();
-    }
-
-    const NIPtr<Internal::RingBuffer>& GetRingBuffer() const
-    {
-        return mRingBuffer;
     }
 
     const NIPtr<Internal::RootSignatureManager>& GetRootSignatureManager() const
@@ -304,7 +184,6 @@ public:
         return mShaderLibrary->GetShaderData(name);
     }
 
-    // TODO: TEMPORARY, remove after reworks
     const NIPtr<Internal::RenderingContext>& GetRenderingContext() const
     {
         return mRenderingContext;
