@@ -252,7 +252,7 @@ public class StageBackground extends Application {
             stage.setOpacity(opacityChoice.getValue().getOpacity());
         });
 
-        fillChoice.setValue(FillChoice.TRANSPARENT);
+        fillChoice.setValue(FillChoice.TRANSLUCENT_RED);
         if (Platform.getPreferences().getColorScheme() == ColorScheme.LIGHT) {
             schemeChoice.setValue(ColorSchemeChoice.LIGHT);
         } else {
