@@ -1645,6 +1645,12 @@ JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindowWin
             if (mask & com_sun_glass_ui_Window_DARK_FRAME) {
                 pWindow->SetDarkFrame(true);
             }
+
+            if (mask & com_sun_glass_ui_Window_UNIFIED) {
+                DWM_SYSTEMBACKDROP_TYPE backdrop = DWMSBT_TRANSIENTWINDOW;
+                ::DwmSetWindowAttribute(hWnd, DWMWA_SYSTEMBACKDROP_TYPE,
+                    &backdrop, sizeof(backdrop));
+            }
         }
 
         return (jlong)hWnd;

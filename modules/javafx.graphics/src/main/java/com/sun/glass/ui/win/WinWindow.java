@@ -317,8 +317,9 @@ class WinWindow extends Window {
     @Override native protected void _ungrabFocus(long ptr);
     @Override native protected void _setCursor(long ptr, Cursor cursor);
 
-    @Override protected long _createWindow(long ownerPtr, long screenPtr, int mask) {
-        // We need the GDI surface if we're uploading pixels or the pipeline
+    @Override
+    protected long _createWindow(long ownerPtr, long screenPtr, int mask) {
+        // We need the GDI redirection surface if we're uploading pixels or the pipeline
         // is not D3D12.
         boolean needsRedirectionBitmap = false;
         if (isTransparentWindow()) {
