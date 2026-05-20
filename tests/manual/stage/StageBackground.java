@@ -26,7 +26,6 @@
 import javafx.application.Application;
 import javafx.application.Platform;
 import javafx.application.ColorScheme;
-import javafx.application.Platform.Preferences;
 import javafx.geometry.Pos;
 import javafx.geometry.Insets;
 import javafx.scene.control.Button;
@@ -144,7 +143,6 @@ public class StageBackground extends Application {
 
     private Parent labeledSection(String text, Parent section) {
         var label = new Label(text);
-        label.textFillProperty().bind(Platform.getPreferences().foregroundColorProperty());
         VBox box = new VBox(label, section);
         box.setSpacing(5);
         return box;
@@ -152,7 +150,6 @@ public class StageBackground extends Application {
 
     private Parent labeledSection(String text) {
         var label = new Label(text);
-        label.textFillProperty().bind(Platform.getPreferences().foregroundColorProperty());
         VBox box = new VBox(label);
         box.setSpacing(5);
         return box;
@@ -279,7 +276,6 @@ public class StageBackground extends Application {
 
     @Override
     public void start(Stage stage) {
-        // setUserAgentStylesheet("file:////Users/martin/Java/jfx/teststyles.css");
         showStage(stage, StageStyleChoice.UNIFIED);
     }
 }
