@@ -32,6 +32,7 @@ import com.sun.glass.ui.Pixels;
 import com.sun.glass.ui.Screen;
 import com.sun.glass.ui.View;
 import com.sun.glass.ui.Window;
+import com.sun.prism.GraphicsPipeline;
 
 /**
  * MS Windows platform implementation class for Window.
@@ -290,7 +291,8 @@ class WinWindow extends Window {
     native private long _getInsets(long ptr);
     native private long _getAnchor(long ptr);
     native private void _showSystemMenu(long ptr, int x, int y);
-    @Override native protected long _createWindow(long ownerPtr, long screenPtr, int mask);
+    native protected long _createWindowWin(long ownerPtr, long screenPtr, int mask, boolean withRedirection);
+
     @Override native protected boolean _close(long ptr);
     @Override native protected boolean _setView(long ptr, View view);
     @Override native protected void _updateViewSize(long ptr);
@@ -314,6 +316,23 @@ class WinWindow extends Window {
     @Override native protected boolean _grabFocus(long ptr);
     @Override native protected void _ungrabFocus(long ptr);
     @Override native protected void _setCursor(long ptr, Cursor cursor);
+
+    @Override protected long _createWindow(long ownerPtr, long screenPtr, int mask) {
+        // We need the GDI surface if we're uploading pixels or the pipeline
+        // is not D3D12.
+        boolean needsRedirectionBitmap = false;
+        if (isTransparentWindow()) {
+            needsRedirectionBitmap = true;
+        } else {
+            var pipeline = GraphicsPipeline.getPipeline();
+            if (pipeline.isUploading()) {
+                needsRedirectionBitmap = true;
+            } else if (!pipeline.toString().contains("d3d12")) {
+                needsRedirectionBitmap = true;
+            }
+        }
+        return _createWindowWin(ownerPtr, screenPtr, mask, needsRedirectionBitmap);
+    }
 
     @Override
     protected void _requestInput(long ptr, String text, int type, double width, double height,

@@ -41,6 +41,8 @@
 #include "com_sun_glass_ui_Window_Level.h"
 #include "com_sun_glass_ui_win_WinWindow.h"
 
+#include <iostream>
+
 #define ABM_GETAUTOHIDEBAREX 0x0000000b // multimon aware autohide bars
 
 #define HTUNSPECIFIED ('H' << 24 | 'T' << 16 | 'U' << 8 | 'N') // see WinWindow.java:nonClientHitTest
@@ -1559,11 +1561,11 @@ JNIEXPORT void JNICALL Java_com_sun_glass_ui_win_WinWindow__1initIDs
 
 /*
  * Class:     com_sun_glass_ui_win_WinWindow
- * Method:    _createWindow
- * Signature: (JJZI)J
+ * Method:    _createWindowWin
+ * Signature: (JJZIZ)J
  */
-JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindow
-    (JNIEnv *env, jobject jThis, jlong ownerPtr, jlong screenPtr, jint mask)
+JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindowWin
+    (JNIEnv *env, jobject jThis, jlong ownerPtr, jlong screenPtr, jint mask, jboolean withBitmap)
 {
     ENTER_MAIN_THREAD_AND_RETURN(jlong)
     {
@@ -1615,7 +1617,7 @@ JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindow
             dwExStyle |= WS_EX_NOINHERITLAYOUT | WS_EX_LAYOUTRTL;
         }
 
-        if ((mask & com_sun_glass_ui_Window_TRANSPARENT) == 0) {
+        if (!withBitmap) {
             dwExStyle |= WS_EX_NOREDIRECTIONBITMAP;
         }
 
@@ -1651,12 +1653,14 @@ JNIEXPORT jlong JNICALL Java_com_sun_glass_ui_win_WinWindow__1createWindow
     HWND owner;
     HMONITOR hMonitor;
     jint mask;
+    jboolean withBitmap;
     LEAVE_MAIN_THREAD;
 
     ARG(jThis) = jThis;
     ARG(owner) = (HWND)ownerPtr;
     ARG(hMonitor) = (HMONITOR)screenPtr;
     ARG(mask) = mask;
+    ARG(withBitmap) = withBitmap;
 
     return PERFORM_AND_RETURN();
 }
